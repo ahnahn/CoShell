@@ -1,4 +1,4 @@
-make setup
+make
 
 ./coshell
 
