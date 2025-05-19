@@ -1,11 +1,15 @@
-CC = gcc
-CFLAGS = -Wall -O2 -std=c11
-LIBS = -lncurses -lpthread
+# Makefile
 
-TARGET = coshell
-SRC = coshell.c
+CC      = gcc
+CFLAGS  = -Wall -O2 -std=c11
+LIBS    = -lncurses -lpthread
 
-all: $(TARGET)
+TARGET  = coshell
+SRC     = coshell.c
+
+.PHONY: all setup install clean
+
+all: setup $(TARGET)
 
 $(TARGET): $(SRC)
 	$(CC) $(CFLAGS) -o $@ $^ $(LIBS)
@@ -13,8 +17,13 @@ $(TARGET): $(SRC)
 run: $(TARGET)
 	./$(TARGET)
 
+install: $(TARGET)
+	sudo cp $(TARGET) /usr/local/bin
+
 setup:
-	sudo apt update && sudo apt install -y build-essential libncurses5-dev libncursesw5-dev qrencode
+	@echo "Installing dependencies..."
+	@sudo apt update -qq
+	@sudo apt install -y libncurses-dev qrencode
 
 clean:
 	rm -f $(TARGET)
