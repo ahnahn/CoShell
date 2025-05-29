@@ -294,13 +294,21 @@ void ui_main() {
         else if (ch == 'c') {
             // [c] 채팅 클라이언트 실행
             werase(win_input);
-            mvwprintw(win_input, 1, 1,
-                "Chat server host (e.g., localhost or 127.0.0.1): ");
+
+
+            const char *prompt = "Chat server host (e.g., localhost or 127.0.0.1): ";
+            mvwprintw(win_input, 1, 1, "%s", prompt);
             wrefresh(win_input);
+
+
+            //mvwprintw(win_input, 1, 1,
+            //    "Chat server host (e.g., localhost or 127.0.0.1): ");
+            //wrefresh(win_input);
 
             echo();
             char buf[128];
-            mvwgetnstr(win_input, 1, 36, buf, 100);
+            //mvwgetnstr(win_input, 1, 36, buf, 100);
+            mvwgetnstr(win_input, 1, strlen(prompt) + 1, buf, 100);
             noecho();
 
             char host[128];
@@ -308,11 +316,19 @@ void ui_main() {
             host[sizeof(host) - 1] = '\0';
 
             werase(win_input);
-            mvwprintw(win_input, 1, 1, "Port: ");
+
+
+            const char *prompt2 = "Port: ";
+            mvwprintw(win_input, 1, 1, "%s", prompt2);
             wrefresh(win_input);
 
+
+            //mvwprintw(win_input, 1, 1, "Port: ");
+            //wrefresh(win_input);
+
             echo();
-            mvwgetnstr(win_input, 1, 6, buf, 10);
+            mvwgetnstr(win_input, 1, strlen(prompt2) + 1, buf, 10);
+            //mvwgetnstr(win_input, 1, 6, buf, 10);
             noecho();
 
             int port = atoi(buf);
