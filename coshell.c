@@ -51,6 +51,7 @@ int todo_count = 0;
 
 /* 함수 선언 */
 void show_main_menu();
+void cli_main(int argc, char *argv[]);
 void ui_main();
 void load_todo();
 void draw_todo();
@@ -70,6 +71,15 @@ int main(int argc, char *argv[]) {
         /* 인자 없이 실행된 경우 → 메뉴 모드 */
         show_main_menu();
     }
+    else if (
+        /* CLI 모드(직접 실행) */
+    	strcmp(argv[1], "add") == 0 ||
+    	strcmp(argv[1], "list") == 0 ||
+   	strcmp(argv[1], "del") == 0 ||
+    	strcmp(argv[1], "qr") == 0
+    ) {
+    	cli_main(argc - 1, &argv[1]);
+    }
     else if (strcmp(argv[1], "ui") == 0) {
         /* UI 모드(직접 실행) */
         ui_main();
@@ -85,10 +95,11 @@ int main(int argc, char *argv[]) {
     else {
         fprintf(stderr, "Invalid mode or missing arguments.\n");
         fprintf(stderr, "Usage:\n");
-        fprintf(stderr, "  coshell            # 메뉴 모드\n");
-        fprintf(stderr, "  coshell ui         # UI 모드 (ToDo + Chat)\n");
-        fprintf(stderr, "  coshell server <port>\n");
-        fprintf(stderr, "  coshell client <host> <port>\n");
+        fprintf(stderr, "  coshell [add|list|del|qr] ...  # CLI 모드		\n");
+        fprintf(stderr, "  coshell            		 # 메뉴 모드		\n");
+        fprintf(stderr, "  coshell ui         		 # UI 모드 (ToDo + Chat)\n");
+        fprintf(stderr, "  coshell server <port>				\n");
+        fprintf(stderr, "  coshell client <host> <port>				\n");
         return 1;
     }
     return 0;
@@ -144,6 +155,78 @@ void show_main_menu() {
         }
     }
 }
+
+// Modify by Geonwo
+/*==============================*/
+/*           CLI 모드           */
+/*==============================*/
+void cli_main(int argc, char *argv[]) {
+    if (argc == 0) {
+        printf("Usage:\n");
+        printf("  coshell cli list\n");
+        printf("  coshell cli add <item>\n");
+        printf("  coshell cli del <index>\n");
+        printf("  coshell cli qr <filepath>\n");
+        return;
+    }
+
+    // load todo list
+    load_todo();
+
+    if (strcmp(argv[0], "list") == 0) {
+        for (int i = 0; i < todo_count; i++) {
+            printf("%d. %s\n", i + 1, todos[i]);
+        }
+    }
+    else if (strcmp(argv[0], "add") == 0 && argc >= 2) {
+        // 공백 포함 전체 메시지 합치기
+        char buf[512] = {0};
+        for (int i = 1; i < argc; i++) {
+            strcat(buf, argv[i]);
+            if (i < argc - 1) strcat(buf, " ");
+        }
+
+        pthread_mutex_lock(&todo_lock);
+        add_todo(buf);
+        pthread_mutex_unlock(&todo_lock);
+
+        printf("Added: %s\n", buf);
+    }
+    else if (strcmp(argv[0], "del") == 0 && argc == 2) {
+        int idx = atoi(argv[1]) - 1;
+        if (idx < 0 || idx >= todo_count) {
+            printf("Invalid index.\n");
+            return;
+        }
+
+        pthread_mutex_lock(&todo_lock);
+        // 삭제
+        free(todos[idx]);
+        for (int i = idx; i < todo_count - 1; i++) {
+            todos[i] = todos[i + 1];
+        }
+        todo_count--;
+
+        // 파일 다시 저장
+        FILE *fp = fopen(TODO_FILE, "w");
+        if (fp) {
+            for (int i = 0; i < todo_count; i++) {
+                fprintf(fp, "%s\n", todos[i]);
+            }
+            fclose(fp);
+        }
+        pthread_mutex_unlock(&todo_lock);
+
+        printf("Deleted todo #%d\n", idx + 1);
+    }
+    else if (strcmp(argv[0], "qr") == 0 && argc == 2) {
+        show_qr(argv[1]);  // QR은 chat 창 없이 터미널에 직접 출력됨
+    }
+    else {
+        fprintf(stderr, "Unknown or invalid CLI command.\n");
+    }
+}
+
 
 /*==============================*/
 /*   UI 모드 (ToDo + 채팅)      */
