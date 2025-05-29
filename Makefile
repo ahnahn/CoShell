@@ -22,7 +22,6 @@ install: $(TARGET)
 
 setup:
 	@echo "Installing dependencies..."
-	@sudo apt update -qq
 	@sudo apt install -y libncurses-dev qrencode
 
 clean:
