@@ -1,18 +1,32 @@
 /*
  * CoShell: 터미널 기반 협업 툴 - 통합 구현(coshell.c)
- * - ToDo 리스트 관리
- * - 실시간 채팅 서버/클라이언트
- * - 파일 전송용 QR 코드 생성 & 화면 출력
- * - ncurses UI: 분할 창, 버튼
+ *   - ToDo 리스트 관리
+ *   - 실시간 채팅 서버/클라이언트
+ *   - 파일 전송용 QR 코드 생성 & 화면 출력
+ *   - ncurses UI: 분할 창, 버튼
+ *
+ * 이제 서버 모드를 실행하면 내부적으로 Serveo.net에 SSH 원격 포워딩을 요청하여
+ * 할당된 원격 포트(Allocated port)를 자동으로 받아오고, 이를 사용자에게 출력한 뒤
+ * 로컬 채팅 서버(LOCAL_PORT)로 바인딩하여 실행합니다.
  *
  * 사용법:
  *   # 인자 없이 실행 시 자동으로 메뉴가 뜹니다.
  *   $ coshell        <-- PATH에 설치되어 있다면 이렇게만 입력해도 됩니다.
  *
- *   # 직접 실행(테스트용)
- *   $ ./coshell ui
- *   $ ./coshell server <port>
- *   $ ./coshell client <host> <port>
+ *   # 서버 모드(Serveo 터널 자동 설정)
+ *   $ coshell server
+ *
+ *   # 클라이언트 모드
+ *   $ coshell client <host> <port>
+ *
+ *   # UI 모드 (ToDo + Chat)
+ *   $ coshell ui
+ *
+ *   # CLI 모드: ToDo/QR
+ *   $ coshell add <item>
+ *   $ coshell list
+ *   $ coshell del <index>
+ *   $ coshell qr <filepath>
  */
 
 #define _POSIX_C_SOURCE 200809L  // strdup, popen, getaddrinfo 등을 명시적으로 활성화
@@ -32,11 +46,15 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <signal.h>
 
 #define MAX_CLIENTS 5
 #define BUF_SIZE    1024
 #define TODO_FILE   "tasks_personal.txt"
 #define MAX_TODO    100
+
+// 로컬 채팅 서버가 바인딩할 포트 (Serveo와 연결 시, 로컬 포트)
+#define LOCAL_PORT 12345
 
 /* 전역 변수 */
 WINDOW *win_chat, *win_todo, *win_input;
@@ -62,6 +80,84 @@ void *client_handler(void *arg);
 void chat_client(const char *host, int port);
 void *recv_handler(void *arg);
 
+/* =============== Serveo 터널 설정 ============== */
+/*
+ * Serveo.net에 SSH 원격 포워딩을 요청하고,
+ * 할당된 원격 포트(Allocated port)를 파싱해서 반환.
+ * 반환값: 원격 포트 번호 (성공 시), -1 (실패 시)
+ * 
+ * 내부적으로 fork() + pipe()를 사용하여 자식 프로세스로 SSH 실행,
+ * 부모는 자식의 출력을 읽으며 "Allocated port <n>" 라인을 찾아냄.
+ */
+int setup_serveo_tunnel(int local_port) {
+    int pipe_fd[2];
+    if (pipe(pipe_fd) < 0) {
+        perror("pipe");
+        return -1;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        close(pipe_fd[0]);
+        close(pipe_fd[1]);
+        return -1;
+    }
+    else if (pid == 0) {
+        // 자식 프로세스: stdout, stderr를 모두 pipe_fd[1]로 리다이렉트
+        close(pipe_fd[0]);
+        dup2(pipe_fd[1], STDOUT_FILENO);
+        dup2(pipe_fd[1], STDERR_FILENO);
+        close(pipe_fd[1]);
+
+        // "-R" 인자 문자열을 미리 만들어 줘야 ssh가 올바르게 인식함
+        char forward_arg[64];
+        snprintf(forward_arg, sizeof(forward_arg), "0:localhost:%d", local_port);
+
+        execlp(
+            "ssh", "ssh",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "ServerAliveInterval=60",
+            "-N",
+            "-R", forward_arg,
+            "serveo.net",
+            (char*)NULL
+        );
+        // execlp가 실패하면
+        perror("execlp");
+        _exit(1);
+    }
+    else {
+        // 부모 프로세스: pipe_fd[0]에서 읽기, pipe_fd[1] 닫기
+        close(pipe_fd[1]);
+
+        FILE *fp = fdopen(pipe_fd[0], "r");
+        if (!fp) {
+            perror("fdopen");
+            close(pipe_fd[0]);
+            return -1;
+        }
+
+        char line[512];
+        int remote_port = -1;
+        // "Allocated port <n> for remote forward to localhost:<local_port>" 패턴을 찾음
+        while (fgets(line, sizeof(line), fp)) {
+            if (sscanf(line, "Allocated port %d", &remote_port) == 1) {
+                // 원격 포트 번호 파싱 성공
+                printf(">> Serveo 터널 할당 완료: serveo.net:%d\n", remote_port);
+                fflush(stdout);
+                break;
+            }
+        }
+
+        // 이 시점부터 SSH 프로세스(pid)는 백그라운드에서 계속 실행되며,
+        // Serveo 터널을 유지함.
+        fclose(fp);
+        return remote_port;
+    }
+}
+/* ================================================ */
+
 int main(int argc, char *argv[]) {
     // (한글 UI를 다시 사용하려면 아래 주석을 해제하세요)
     // setlocale(LC_ALL, "");
@@ -73,20 +169,30 @@ int main(int argc, char *argv[]) {
     }
     else if (
         /* CLI 모드(직접 실행) */
-    	strcmp(argv[1], "add") == 0 ||
-    	strcmp(argv[1], "list") == 0 ||
-   	strcmp(argv[1], "del") == 0 ||
-    	strcmp(argv[1], "qr") == 0
+        strcmp(argv[1], "add") == 0 ||
+        strcmp(argv[1], "list") == 0 ||
+        strcmp(argv[1], "del") == 0 ||
+        strcmp(argv[1], "qr") == 0
     ) {
-    	cli_main(argc - 1, &argv[1]);
+        cli_main(argc - 1, &argv[1]);
     }
     else if (strcmp(argv[1], "ui") == 0) {
         /* UI 모드(직접 실행) */
         ui_main();
     }
-    else if (strcmp(argv[1], "server") == 0 && argc == 3) {
-        /* 서버 모드(직접 실행) */
-        chat_server(atoi(argv[2]));
+    else if (strcmp(argv[1], "server") == 0) {
+        /* 서버 모드(Serveo 터널 자동 설정) */
+        printf(">> Serveo.net을 통해 원격 포트를 요청하는 중...\n");
+
+        int remote_port = setup_serveo_tunnel(LOCAL_PORT);
+        if (remote_port < 0) {
+            fprintf(stderr, "Serveo 터널 설정 실패. 로컬 서버를 바로 실행합니다.\n");
+            chat_server(LOCAL_PORT);
+        } else {
+            printf(">> Serveo 원격 주소: serveo.net:%d\n", remote_port);
+            printf(">> 로컬 채팅 서버를 %d번 포트에 바인딩하여 실행합니다.\n", LOCAL_PORT);
+            chat_server(LOCAL_PORT);
+        }
     }
     else if (strcmp(argv[1], "client") == 0 && argc == 4) {
         /* 클라이언트 모드(직접 실행) */
@@ -95,13 +201,14 @@ int main(int argc, char *argv[]) {
     else {
         fprintf(stderr, "Invalid mode or missing arguments.\n");
         fprintf(stderr, "Usage:\n");
-        fprintf(stderr, "  coshell [add|list|del|qr] ...  # CLI 모드		\n");
-        fprintf(stderr, "  coshell            		 # 메뉴 모드		\n");
-        fprintf(stderr, "  coshell ui         		 # UI 모드 (ToDo + Chat)\n");
-        fprintf(stderr, "  coshell server <port>				\n");
-        fprintf(stderr, "  coshell client <host> <port>				\n");
+        fprintf(stderr, "  coshell [add|list|del|qr] ...  # CLI 모드\n");
+        fprintf(stderr, "  coshell              # 메뉴 모드\n");
+        fprintf(stderr, "  coshell ui           # UI 모드 (ToDo + Chat)\n");
+        fprintf(stderr, "  coshell server       # Serveo 터널 자동 설정 + 서버 실행\n");
+        fprintf(stderr, "  coshell client <host> <port>   # 채팅 클라이언트\n");
         return 1;
     }
+
     return 0;
 }
 
@@ -115,7 +222,7 @@ void show_main_menu() {
         printf("\033[H\033[J");
 
         printf("\n===== CoShell Main Menu =====\n");
-        printf("1. Run Chat Server\n");
+        printf("1. Run Chat Server (Serveo 터널 자동 설정)\n");
         printf("2. Run Client (ToDo + Chat UI)\n");
         printf("3. Exit\n");
         printf("Select (1-3): ");
@@ -127,18 +234,18 @@ void show_main_menu() {
         getchar();  // 개행 문자 제거
 
         if (choice == 1) {
-            int port;
-            printf("Enter port for chat server: ");
-            if (scanf("%d", &port) != 1) {
-                fprintf(stderr, "Port input error. Returning to menu.\n");
-                getchar();
-                continue;
-            }
-            getchar();
             printf("\033[H\033[J");
-            printf("Chat server listening on port %d...\n", port);
-            chat_server(port);
-            // 서버 모드는 무한 루프 → 종료하려면 Ctrl+C
+            printf("Chat server (Serveo 터널 자동 설정) 실행 중...\n");
+            // Serveo 터널 자동 설정 + 서버 실행
+            int remote_port = setup_serveo_tunnel(LOCAL_PORT);
+            if (remote_port < 0) {
+                fprintf(stderr, "Serveo 터널 설정 실패. 로컬 서버를 바로 실행합니다.\n");
+                chat_server(LOCAL_PORT);
+            } else {
+                printf(">> Serveo 원격 주소: serveo.net:%d\n", remote_port);
+                printf(">> 로컬 채팅 서버를 %d번 포트에 바인딩하여 실행합니다.\n", LOCAL_PORT);
+                chat_server(LOCAL_PORT);
+            }
             break;
         }
         else if (choice == 2) {
@@ -163,10 +270,10 @@ void show_main_menu() {
 void cli_main(int argc, char *argv[]) {
     if (argc == 0) {
         printf("Usage:\n");
-        printf("  coshell cli list\n");
-        printf("  coshell cli add <item>\n");
-        printf("  coshell cli del <index>\n");
-        printf("  coshell cli qr <filepath>\n");
+        printf("  coshell list\n");
+        printf("  coshell add <item>\n");
+        printf("  coshell del <index>\n");
+        printf("  coshell qr <filepath>\n");
         return;
     }
 
@@ -295,19 +402,12 @@ void ui_main() {
             // [c] 채팅 클라이언트 실행
             werase(win_input);
 
-
             const char *prompt = "Chat server host (e.g., localhost or 127.0.0.1): ";
             mvwprintw(win_input, 1, 1, "%s", prompt);
             wrefresh(win_input);
 
-
-            //mvwprintw(win_input, 1, 1,
-            //    "Chat server host (e.g., localhost or 127.0.0.1): ");
-            //wrefresh(win_input);
-
             echo();
             char buf[128];
-            //mvwgetnstr(win_input, 1, 36, buf, 100);
             mvwgetnstr(win_input, 1, strlen(prompt) + 1, buf, 100);
             noecho();
 
@@ -317,18 +417,12 @@ void ui_main() {
 
             werase(win_input);
 
-
             const char *prompt2 = "Port: ";
             mvwprintw(win_input, 1, 1, "%s", prompt2);
             wrefresh(win_input);
 
-
-            //mvwprintw(win_input, 1, 1, "Port: ");
-            //wrefresh(win_input);
-
             echo();
             mvwgetnstr(win_input, 1, strlen(prompt2) + 1, buf, 10);
-            //mvwgetnstr(win_input, 1, 6, buf, 10);
             noecho();
 
             int port = atoi(buf);
@@ -384,7 +478,8 @@ void add_todo(const char *item) {
 /*==============================*/
 void show_qr(const char *filename) {
     char cmd[512];
-    snprintf(cmd, sizeof(cmd), "qrencode -t ANSIUTF8 -o - '%s'", filename);
+    snprintf(cmd, sizeof(cmd), "qrencode -t ASCII -o - '%s'", filename);
+
     FILE *fp = popen(cmd, "r");
     if (!fp) return;
 
